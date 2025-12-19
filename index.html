@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Simple School Management</title>
+    <style>
+        :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;}
+        body{margin:0;padding:24px;background:#f6f8fa;color:#111}
+        header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+        h1{font-size:18px;margin:0}
+        .tabs{display:flex;gap:8px}
+        .tab{padding:8px 12px;border-radius:6px;background:#fff;border:1px solid #e1e4e8;cursor:pointer}
+        .tab.active{background:#0366d6;color:#fff;border-color:#0366d6}
+        .container{background:#fff;padding:16px;border:1px solid #e1e4e8;border-radius:6px}
+        form{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+        input,select{padding:8px;border:1px solid #dfe4e8;border-radius:6px}
+        button{padding:8px 12px;border-radius:6px;border:0;background:#0366d6;color:#fff;cursor:pointer}
+        table{width:100%;border-collapse:collapse;margin-top:8px}
+        th,td{padding:8px;border-bottom:1px solid #eef2f5;text-align:left}
+        .muted{color:#666;font-size:13px}
+        .actions button{margin-right:6px;background:#e55353}
+        .actions button.edit{background:#2ea44f}
+        @media (max-width:720px){form{flex-direction:column}}
+    </style>
+</head>
+<body>
+        <header>
+                <h1>Simple School Management</h1>
+                <div style="display:flex;gap:12px;align-items:center">
+                    <div class="tabs">
+                        <div id="tab-students" class="tab active">Students</div>
+                        <div id="tab-classes" class="tab">Classes</div>
+                    </div>
+                    <div id="sync-controls" style="display:flex;gap:8px;align-items:center">
+                        <input id="login-user" placeholder="user" style="padding:6px;border-radius:6px;border:1px solid #dfe4e8" />
+                        <input id="login-pass" placeholder="password" type="password" style="padding:6px;border-radius:6px;border:1px solid #dfe4e8" />
+                        <button id="login-btn">Login</button>
+                        <button id="push-btn" title="Push local data to server">Push</button>
+                        <button id="pull-btn" title="Pull data from server to local">Pull</button>
+                        <button id="export-btn" title="Export local students CSV">Export CSV</button>
+                        <label style="background:#fff;padding:6px;border-radius:6px;border:1px solid #dfe4e8;cursor:pointer">Import CSV<input id="import-file" type="file" accept="text/csv" style="display:none" /></label>
+                    </div>
+                </div>
+        </header>
+
+    <main>
+        <section id="students-section" class="container">
+            <div class="muted">Manage student records</div>
+            <form id="student-form">
+                <input id="student-name" placeholder="Name" required />
+                <input id="student-age" type="number" placeholder="Age" min="3" max="120" required />
+                <select id="student-class"></select>
+                <input type="hidden" id="student-id" />
+                <button id="student-save">Add Student</button>
+            </form>
+
+            <table id="students-table">
+                <thead>
+                    <tr><th>Name</th><th>Age</th><th>Class</th><th>Actions</th></tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </section>
+
+        <section id="classes-section" class="container" style="display:none;margin-top:12px">
+            <div class="muted">Manage class list</div>
+            <form id="class-form">
+                <input id="class-name" placeholder="Class name (e.g., Grade 1A)" required />
+                <input id="class-teacher" placeholder="Teacher" />
+                <input type="hidden" id="class-id" />
+                <button id="class-save">Add Class</button>
+            </form>
+
+            <table id="classes-table">
+                <thead>
+                    <tr><th>Class</th><th>Teacher</th><th>Actions</th></tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </section>
+    </main>
+
+    <script>
+        // LocalStorage keys
+        const KEY_STUDENTS = 'sms_students_v1'
+        const KEY_CLASSES = 'sms_classes_v1'
+        const TOKEN_KEY = 'sms_token'
+        const SERVER_BASE = 'http://localhost:3000'
+
+        // Utilities
+        const $ = id => document.getElementById(id)
+        const qs = sel => document.querySelector(sel)
+
+        // Tab handling
+        const tabStudents = $('tab-students')
+        const tabClasses = $('tab-classes')
+        const studentsSection = $('students-section')
+        const classesSection = $('classes-section')
+
+        tabStudents.addEventListener('click', ()=>{showTab('students')})
+        tabClasses.addEventListener('click', ()=>{showTab('classes')})
+        function showTab(name){
+            if(name==='students'){
+                tabStudents.classList.add('active');tabClasses.classList.remove('active');
+                studentsSection.style.display='block';classesSection.style.display='none'
+            } else {
+                tabClasses.classList.add('active');tabStudents.classList.remove('active');
+                classesSection.style.display='block';studentsSection.style.display='none'
+            }
+        }
+
+                // Data helpers
+                function read(key){return JSON.parse(localStorage.getItem(key) || '[]')}
+                function write(key,val){localStorage.setItem(key, JSON.stringify(val))}
+
+                function getToken(){ return localStorage.getItem(TOKEN_KEY) }
+                function setToken(t){ if(t) localStorage.setItem(TOKEN_KEY,t); else localStorage.removeItem(TOKEN_KEY) }
+
+                async function apiFetch(path, opts={}){
+                    const token = getToken();
+                    const headers = opts.headers || {};
+                    if(!headers['Content-Type'] && !(opts.body instanceof FormData)) headers['Content-Type'] = 'application/json';
+                    if(token) headers['Authorization'] = 'Bearer '+token;
+                    const res = await fetch(SERVER_BASE + path, Object.assign({}, opts, { headers }));
+                    if(!res.ok){ const txt = await res.text().catch(()=>null); throw new Error(txt||res.statusText) }
+                    const ct = res.headers.get('content-type') || '';
+                    if(ct.includes('application/json')) return res.json();
+                    return res.text();
+                }
+
+        // Classes
+        function loadClasses(){
+            return read(KEY_CLASSES)
+        }
+        function saveClass(obj){
+            const list = loadClasses()
+            if(obj.id==null){obj.id = Date.now(); list.push(obj)} else {
+                const idx = list.findIndex(x=>x.id===obj.id); if(idx>-1) list[idx]=obj
+            }
+            write(KEY_CLASSES,list); renderClasses(); renderClassOptions();
+        }
+        function deleteClass(id){
+            let list = loadClasses(); list = list.filter(x=>x.id!==id); write(KEY_CLASSES,list); renderClasses(); renderClassOptions();
+            // Also remove class references from students
+            const students = loadStudents().map(s=> s.classId===id ? {...s, classId:null} : s); write(KEY_STUDENTS,students); renderStudents();
+        }
+
+        // Students
+        function loadStudents(){return read(KEY_STUDENTS)}
+        function saveStudent(obj){
+            const list = loadStudents()
+            if(obj.id==null){obj.id = Date.now(); list.push(obj)} else {
+                const idx = list.findIndex(x=>x.id===obj.id); if(idx>-1) list[idx]=obj
+            }
+            write(KEY_STUDENTS,list); renderStudents();
+        }
+        function deleteStudent(id){
+            let list = loadStudents(); list = list.filter(x=>x.id!==id); write(KEY_STUDENTS,list); renderStudents();
+        }
+
+        // Rendering
+        function renderClassOptions(){
+            const sel = $('student-class'); sel.innerHTML = '<option value="">-- No class --</option>'
+            loadClasses().forEach(c=>{
+                const opt = document.createElement('option'); opt.value = c.id; opt.textContent = c.name; sel.appendChild(opt)
+            })
+        }
+        function renderStudents(){
+            const tbody = document.querySelector('#students-table tbody'); tbody.innerHTML = ''
+            loadStudents().forEach(s=>{
+                const tr = document.createElement('tr')
+                const cls = loadClasses().find(c=>c.id===s.classId)
+                tr.innerHTML = `<td>${escapeHtml(s.name)}</td><td>${s.age||''}</td><td>${cls?escapeHtml(cls.name):''}</td><td class="actions"></td>`
+                const actions = tr.querySelector('.actions')
+                const edit = document.createElement('button'); edit.textContent='Edit'; edit.className='edit'; edit.onclick = ()=>populateStudentForm(s)
+                const del = document.createElement('button'); del.textContent='Delete'; del.onclick = ()=>{ if(confirm('Delete student?')) deleteStudent(s.id)}
+                actions.appendChild(edit); actions.appendChild(del)
+                tbody.appendChild(tr)
+            })
+        }
+        function renderClasses(){
+            const tbody = document.querySelector('#classes-table tbody'); tbody.innerHTML = ''
+            loadClasses().forEach(c=>{
+                const tr = document.createElement('tr')
+                tr.innerHTML = `<td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.teacher||'')}</td><td class="actions"></td>`
+                const actions = tr.querySelector('.actions')
+                const edit = document.createElement('button'); edit.textContent='Edit'; edit.className='edit'; edit.onclick = ()=>populateClassForm(c)
+                const del = document.createElement('button'); del.textContent='Delete'; del.onclick = ()=>{ if(confirm('Delete class?')) deleteClass(c.id)}
+                actions.appendChild(edit); actions.appendChild(del)
+                tbody.appendChild(tr)
+            })
+        }
+
+                // Sync UI
+                async function login(){
+                    const u = $('login-user').value.trim(); const p = $('login-pass').value;
+                    if(!u||!p){ alert('enter credentials'); return }
+                    try{
+                        const data = await apiFetch('/api/login', { method:'POST', body: JSON.stringify({username:u,password:p}) });
+                        setToken(data.token); alert('login successful');
+                    }catch(e){ alert('login failed: '+e.message) }
+                }
+
+                async function pushToServer(){
+                    if(!getToken()){ alert('Login first'); return }
+                    try{
+                        const localClasses = loadClasses();
+                        const srvClasses = await apiFetch('/api/classes', { method:'GET' });
+                        // ensure classes exist on server, match by name
+                        const nameToId = {};
+                        for(const c of srvClasses) nameToId[c.name] = c.id;
+                        for(const c of localClasses){
+                            if(nameToId[c.name]){
+                                await apiFetch('/api/classes/'+nameToId[c.name], { method:'PUT', body: JSON.stringify({name:c.name,teacher:c.teacher}) });
+                            } else {
+                                const created = await apiFetch('/api/classes', { method:'POST', body: JSON.stringify({name:c.name,teacher:c.teacher}) });
+                                nameToId[c.name] = created.id;
+                            }
+                        }
+                        const localStudents = loadStudents();
+                        for(const s of localStudents){
+                            const classId = s.classId ? nameToId[ localClasses.find(cl=>cl.id===s.classId)?.name ] || null : null;
+                            await apiFetch('/api/students', { method:'POST', body: JSON.stringify({name:s.name,age:s.age,classId}) });
+                        }
+                        alert('Push completed');
+                    }catch(e){ alert('Push failed: '+e.message) }
+                }
+
+                async function pullFromServer(){
+                    if(!getToken()){ alert('Login first'); return }
+                    try{
+                        const srvClasses = await apiFetch('/api/classes', { method:'GET' });
+                        const srvStudents = await apiFetch('/api/students', { method:'GET' });
+                        write(KEY_CLASSES, srvClasses);
+                        write(KEY_STUDENTS, srvStudents);
+                        renderClassOptions(); renderStudents(); renderClasses();
+                        alert('Pulled data to local storage');
+                    }catch(e){ alert('Pull failed: '+e.message) }
+                }
+
+                function exportCSV(){
+                    const students = loadStudents(); const classes = loadClasses();
+                    let csv = 'name,age,class\n';
+                    students.forEach(s=>{ const cls = classes.find(c=>c.id===s.classId); csv += `"${(s.name||'').replace(/"/g,'""')}",${s.age||''},"${(cls?cls.name:'').replace(/"/g,'""')}"\n` });
+                    const blob = new Blob([csv], {type:'text/csv'});
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a'); a.href = url; a.download = 'students_export.csv'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+                }
+
+                function importCSVFile(file){
+                    const reader = new FileReader();
+                    reader.onload = ()=>{
+                        const text = reader.result; const lines = text.split(/\r?\n/).filter(l=>l.trim());
+                        const header = lines.shift().split(',').map(h=>h.trim().toLowerCase());
+                        const classes = loadClasses(); const students = loadStudents();
+                        for(const line of lines){
+                            const cols = line.split(',');
+                            const row = {};
+                            header.forEach((h,i)=> row[h]=cols[i] ? cols[i].replace(/^"|"$/g,'').trim() : '');
+                            const className = row['class'] || row['classname'] || '';
+                            let classId = null;
+                            if(className){
+                                let c = classes.find(x=>x.name===className);
+                                if(!c){ c = { id: Date.now()+Math.floor(Math.random()*1000), name: className, teacher: '' }; classes.push(c); }
+                                classId = c.id;
+                            }
+                            students.push({ id: Date.now()+Math.floor(Math.random()*1000), name: row['name']||row['student']||'', age: row['age']?Number(row['age']):null, classId });
+                        }
+                        write(KEY_CLASSES, classes); write(KEY_STUDENTS, students); renderClassOptions(); renderStudents(); renderClasses();
+                        alert('Imported CSV to local storage');
+                    };
+                    reader.readAsText(file);
+                }
+
+                // wire sync controls
+                document.addEventListener('DOMContentLoaded', ()=>{
+                    $('login-btn').addEventListener('click', login);
+                    $('push-btn').addEventListener('click', pushToServer);
+                    $('pull-btn').addEventListener('click', pullFromServer);
+                    $('export-btn').addEventListener('click', exportCSV);
+                    $('import-file').addEventListener('change', e=>{ if(e.target.files && e.target.files[0]) importCSVFile(e.target.files[0]); });
+                });
+
+        // Form helpers
+        function populateStudentForm(s){ $('student-name').value = s.name; $('student-age').value = s.age||''; $('student-class').value = s.classId||''; $('student-id').value = s.id; $('student-save').textContent='Save Student'; showTab('students') }
+        function populateClassForm(c){ $('class-name').value = c.name; $('class-teacher').value = c.teacher||''; $('class-id').value = c.id; $('class-save').textContent='Save Class'; showTab('classes') }
+        function clearStudentForm(){ $('student-name').value=''; $('student-age').value=''; $('student-class').value=''; $('student-id').value=''; $('student-save').textContent='Add Student' }
+        function clearClassForm(){ $('class-name').value=''; $('class-teacher').value=''; $('class-id').value=''; $('class-save').textContent='Add Class' }
+
+        // Escape helper
+        function escapeHtml(str){ if(!str && str!==0) return ''; return String(str).replace(/[&<>\\\"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])) }
+
+        // Wire forms
+        document.getElementById('student-form').addEventListener('submit', e=>{
+            e.preventDefault()
+            const id = $('student-id').value ? Number($('student-id').value) : null
+            const obj = { id, name: $('student-name').value.trim(), age: Number($('student-age').value)||null, classId: $('student-class').value ? Number($('student-class').value) : null }
+            if(!obj.name){alert('Please enter a student name'); return}
+            saveStudent(obj); clearStudentForm();
+        })
+
+        document.getElementById('class-form').addEventListener('submit', e=>{
+            e.preventDefault()
+            const id = $('class-id').value ? Number($('class-id').value) : null
+            const obj = { id, name: $('class-name').value.trim(), teacher: $('class-teacher').value.trim() }
+            if(!obj.name){alert('Please enter a class name'); return}
+            saveClass(obj); clearClassForm();
+        })
+
+        // Initial seed (only if empty)
+        if(loadClasses().length===0 && loadStudents().length===0){
+            const seedClasses = [{id:1,name:'Grade 1A',teacher:'Ms. Ali'},{id:2,name:'Grade 2B',teacher:'Mr. Omar'}]
+            write(KEY_CLASSES, seedClasses)
+            const seedStudents = [{id:101,name:'Amina',age:7,classId:1},{id:102,name:'Yusuf',age:8,classId:2}]
+            write(KEY_STUDENTS, seedStudents)
+        }
+
+        // Initial render
+        renderClassOptions(); renderStudents(); renderClasses();
+    </script>
+</body>
+</html>
